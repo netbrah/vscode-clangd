@@ -27,6 +27,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as lsp from 'vscode-languageserver-protocol/node';
 
+import {
+  ServiceClient,
+  ServiceServer,
+  findExistingService,
+  removeLock,
+} from './clangd-service';
+
 function fileToUri(filePath: string): string {
   const resolved = path.resolve(filePath);
   // Ensure proper file URI encoding
@@ -293,6 +300,11 @@ class ClangdMCPServer {
   private initialized = false;
   private config: ParsedArgs;
 
+  // Singleton service support
+  private serviceServer: ServiceServer|null = null;
+  private serviceClient: ServiceClient|null = null;
+  private isPrimary = false;
+
   constructor(config: ParsedArgs) {
     this.config = config;
 
@@ -423,38 +435,23 @@ class ClangdMCPServer {
       args: Record<string, unknown>,
       ): Promise<{content: Array<{type: string; text: string}>;
                   isError?: boolean}> {
-    try {
-      switch (name) {
-      case 'clangd_diagnostics':
-        return await this.handleDiagnostics(args);
-      case 'clangd_hover':
-        return await this.handleHover(args);
-      case 'clangd_definition':
-        return await this.handleDefinition(args);
-      case 'clangd_references':
-        return await this.handleReferences(args);
-      case 'clangd_completion':
-        return await this.handleCompletion(args);
-      case 'clangd_format':
-        return await this.handleFormat(args);
-      case 'clangd_switch_source_header':
-        return await this.handleSwitchSourceHeader(args);
-      case 'clangd_symbol_info':
-        return await this.handleSymbolInfo(args);
-      default:
-        return {
-          content: [{type: 'text', text: `Unknown tool: ${name}`}],
-          isError: true,
-        };
+    // Secondary mode: forward to primary via socket
+    if (this.serviceClient?.isConnected()) {
+      try {
+        return await this.serviceClient.request(name, args);
+      } catch (error) {
+        // If the primary went away, try to become primary ourselves
+        this.serviceClient.disconnect();
+        this.serviceClient = null;
+        process.stderr.write(
+            'Lost connection to primary clangd service, becoming primary...\n');
+        await this.becomePrimary();
+        // Fall through to handle locally
       }
-    } catch (error) {
-      const message =
-          error instanceof Error ? error.message : String(error);
-      return {
-        content: [{type: 'text', text: `Error: ${message}`}],
-        isError: true,
-      };
     }
+
+    // Primary mode: handle locally
+    return this.handleToolCallLocally(name, args);
   }
 
   private async handleDiagnostics(args: Record<string, unknown>) {
@@ -760,11 +757,104 @@ class ClangdMCPServer {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
 
+    // Try to connect to an existing clangd service for this workspace
+    const existingSocket = findExistingService(this.config.projectRoot);
+    if (existingSocket) {
+      const client = new ServiceClient(existingSocket);
+      if (await client.connect()) {
+        this.serviceClient = client;
+        process.stderr.write(
+            `Connected to existing clangd service for workspace: ${
+                this.config.projectRoot}\n`);
+      } else {
+        // Socket exists but can't connect — become primary
+        await this.becomePrimary();
+      }
+    } else {
+      // No existing service — become primary
+      await this.becomePrimary();
+    }
+
     process.on('SIGINT', () => this.cleanup());
     process.on('SIGTERM', () => this.cleanup());
   }
 
+  /**
+   * Become the primary service: spawn clangd and start a socket server
+   * so other MCP instances can share this clangd.
+   */
+  private async becomePrimary(): Promise<void> {
+    this.isPrimary = true;
+    this.serviceServer = new ServiceServer(
+        this.config.projectRoot,
+        (method, params) => this.handleToolCallLocally(method, params),
+    );
+    try {
+      await this.serviceServer.start();
+      process.stderr.write(
+          `Started clangd service for workspace: ${
+              this.config.projectRoot}\n`);
+    } catch (err) {
+      process.stderr.write(
+          `Warning: Could not start socket server: ${err}\n`);
+      // Continue without socket server — will still work, just not shared
+      this.serviceServer = null;
+    }
+  }
+
+  /**
+   * Execute a tool call locally (primary mode — owns clangd).
+   * This is separated from handleToolCall so the socket server can call it.
+   */
+  private async handleToolCallLocally(
+      name: string,
+      args: Record<string, unknown>,
+      ): Promise<{content: Array<{type: string; text: string}>;
+                  isError?: boolean}> {
+    try {
+      switch (name) {
+      case 'clangd_diagnostics':
+        return await this.handleDiagnostics(args);
+      case 'clangd_hover':
+        return await this.handleHover(args);
+      case 'clangd_definition':
+        return await this.handleDefinition(args);
+      case 'clangd_references':
+        return await this.handleReferences(args);
+      case 'clangd_completion':
+        return await this.handleCompletion(args);
+      case 'clangd_format':
+        return await this.handleFormat(args);
+      case 'clangd_switch_source_header':
+        return await this.handleSwitchSourceHeader(args);
+      case 'clangd_symbol_info':
+        return await this.handleSymbolInfo(args);
+      default:
+        return {
+          content: [{type: 'text', text: `Unknown tool: ${name}`}],
+          isError: true,
+        };
+      }
+    } catch (error) {
+      const message =
+          error instanceof Error ? error.message : String(error);
+      return {
+        content: [{type: 'text', text: `Error: ${message}`}],
+        isError: true,
+      };
+    }
+  }
+
   private cleanup(): void {
+    // Clean up socket service
+    if (this.serviceClient) {
+      this.serviceClient.disconnect();
+    }
+    if (this.serviceServer) {
+      this.serviceServer.stop();
+    }
+
+    // Clean up clangd process (only in primary mode)
     if (this.connection) {
       this.connection.sendRequest(lsp.ShutdownRequest.type)
           .then(() => {
@@ -773,6 +863,12 @@ class ClangdMCPServer {
           })
           .catch(() => { this.clangdProcess?.kill(); });
     }
+
+    // Clean up lock file if we're the primary
+    if (this.isPrimary) {
+      removeLock(this.config.projectRoot, process.pid);
+    }
+
     process.exit(0);
   }
 }

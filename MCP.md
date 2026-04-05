@@ -15,6 +15,17 @@ The Model Context Protocol is an open standard that lets AI assistants use exter
 - **Switch source/header** — navigate between `.cpp` and `.h` files
 - **Symbol search** — find functions, classes, and variables across the project
 
+## Per-Workspace Singleton
+
+The MCP server ensures **only one clangd process runs per workspace**, even when multiple AI agents work on the same project simultaneously:
+
+- The **first** MCP server instance for a workspace spawns clangd and becomes the *primary*. It listens on a Unix domain socket for other instances.
+- **Subsequent** MCP server instances detect the running primary and connect to it via the socket, forwarding tool requests instead of spawning another clangd.
+- If the **VSCode extension** is running with the clangd extension active, it also starts a socket server. External MCP server instances will detect it and reuse VSCode's clangd — no duplicate processes.
+- If the primary exits, secondary instances automatically promote themselves to primary.
+
+This means you can safely have VSCode open with the clangd extension **and** multiple CLI agents (Gemini CLI, Codex, etc.) working in the same workspace — they all share one clangd instance.
+
 ## Prerequisites
 
 1. **Node.js** (v18 or later)
@@ -153,6 +164,30 @@ Search for symbols matching a query.
 Input: { "query": "MyClass" }
 ```
 
+## How the Singleton Works
+
+```
+┌──────────────────┐     ┌──────────────────┐
+│ Gemini CLI       │     │ Codex            │
+│ ↕ stdio          │     │ ↕ stdio          │
+│ MCP Process 1    │     │ MCP Process 2    │
+│ (secondary)      │     │ (secondary)      │
+└────────┬─────────┘     └────────┬─────────┘
+         │ socket                 │ socket
+         │                        │
+         ▼                        ▼
+    ┌─────────────────────────────────┐
+    │  Primary (first MCP instance   │
+    │  OR VSCode extension)          │
+    │  ↕ stdio                       │
+    │  clangd (single instance)      │
+    └─────────────────────────────────┘
+```
+
+- A **lock file** at `/tmp/clangd-mcp-<hash>.lock` tracks the primary's PID and socket path.
+- A **Unix domain socket** at `/tmp/clangd-mcp-<hash>.sock` carries tool requests between secondaries and the primary.
+- The `<hash>` is derived from the absolute project root path, ensuring each workspace gets its own clangd.
+
 ## Troubleshooting
 
 ### clangd not found
@@ -166,6 +201,12 @@ Ensure your project has a `compile_commands.json` in the project root. For CMake
 ```bash
 cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=1 -B build
 ln -s build/compile_commands.json .
+```
+
+### Stale lock file
+If a previous clangd service didn't shut down cleanly, you may see connection errors. The MCP server automatically detects stale lock files (by checking if the PID is still alive) and cleans them up. If issues persist, manually remove the lock file:
+```bash
+rm /tmp/clangd-mcp-*.lock /tmp/clangd-mcp-*.sock
 ```
 
 ### Debugging
