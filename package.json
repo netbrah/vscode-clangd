@@ -30,8 +30,13 @@
         "onLanguage:objective-cpp"
     ],
     "main": "./out/bundle",
+    "bin": {
+        "clangd-mcp": "./out/mcp-server.js"
+    },
     "scripts": {
         "esbuild": "esbuild ./src/extension.ts --bundle --outfile=out/bundle.js --external:@aws-sdk/client-s3 --external:vscode --format=cjs --platform=node",
+        "esbuild-mcp": "esbuild ./src/mcp-server.ts --bundle --outfile=out/mcp-server.js --format=cjs --platform=node",
+        "build-mcp": "npm run esbuild-mcp -- --sourcemap",
         "vscode:prepublish": "npm run check-ts && npm run esbuild -- --minify --keep-names",
         "compile": "npm run esbuild -- --sourcemap",
         "check-ts": "tsc -noEmit -p ./",
@@ -48,7 +53,9 @@
     },
     "dependencies": {
         "@clangd/install": "0.1.20",
-        "vscode-languageclient": "^9.0.1"
+        "@modelcontextprotocol/sdk": "^1.29.0",
+        "vscode-languageclient": "^9.0.1",
+        "vscode-languageserver-protocol": "^3.17.5"
     },
     "devDependencies": {
         "@types/glob": "^9.0.0",
