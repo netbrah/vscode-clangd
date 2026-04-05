@@ -17,6 +17,11 @@ import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
 
+// === Constants ===
+
+const CONNECTION_TIMEOUT_MS = 3000;
+const REQUEST_TIMEOUT_MS = 30000;
+
 // === Path helpers ===
 
 function getWorkspaceId(projectRoot: string): string {
@@ -290,7 +295,7 @@ export class ServiceClient {
           this.socket?.destroy();
           resolve(false);
         }
-      }, 3000);
+      }, CONNECTION_TIMEOUT_MS);
     });
   }
 
@@ -317,7 +322,7 @@ export class ServiceClient {
           this.pending.delete(id);
           reject(new Error(`Request ${method} timed out`));
         }
-      }, 30000);
+      }, REQUEST_TIMEOUT_MS);
     });
   }
 

@@ -25,6 +25,7 @@ import type {Tool} from '@modelcontextprotocol/sdk/types.js';
 import * as cp from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as url from 'url';
 import * as lsp from 'vscode-languageserver-protocol/node';
 
 import {
@@ -34,14 +35,15 @@ import {
   removeLock,
 } from './clangd-service';
 
+// Timeout constants
+const DIAGNOSTICS_TIMEOUT_MS = 10000;
+
 function fileToUri(filePath: string): string {
-  const resolved = path.resolve(filePath);
-  // Ensure proper file URI encoding
-  return `file://${resolved}`;
+  return url.pathToFileURL(path.resolve(filePath)).href;
 }
 
 function uriToFile(uri: string): string {
-  return uri.replace(/^file:\/\//, '');
+  return url.fileURLToPath(uri);
 }
 
 function getLanguageId(filePath: string): string {
@@ -417,7 +419,7 @@ class ClangdMCPServer {
   }
 
   private async waitForDiagnostics(uri: string,
-                                   timeoutMs = 10000):
+                                   timeoutMs = DIAGNOSTICS_TIMEOUT_MS):
       Promise<lsp.Diagnostic[]> {
     const start = Date.now();
     // Wait for at least one diagnostic notification for this URI
