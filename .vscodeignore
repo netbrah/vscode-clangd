@@ -1,4 +1,5 @@
 **
+docs/upstream-llvm/**
 !*.md
 !*.png
 !doc-assets/**
